@@ -8,25 +8,18 @@
         "description": "provide a 2-13 character prefix for all resources."
       }
     },
-    "ContainerName": {
-      "type": "string",
-      "defaultValue": "redis",
-      "metadata": {
-        "description": "Name of the container"
-      }
-    },
-    "DNSNameLabel": {
+    "RedisName": {
       "type": "string",
       "defaultValue": "[concat(parameters('ResourcePrefix'), '-redis')]",
       "metadata": {
-        "description": "DNS Name Label for the Public IP address"
+        "description": "Redis Hostname"
       }
     },
-    "RedisPassword": {
-      "type": "securestring",
-      "defaultValue": "redis",
+	"RedisPort": {
+      "type": "int",
+      "defaultValue": 10000,
       "metadata": {
-        "description": "Redis Password"
+        "description": "Redis Port"
       }
     },
     "HostingPlanName": {
@@ -85,15 +78,14 @@
         "description": "Name of Application Insights"
       }
     },
-    "OpenAIName": {
+    "OpenAIEndpoint": {
       "type": "string",
       "metadata": {
-        "description": "Name of OpenAI Resource"
+        "description": "Endpoint of OpenAI Resource"
       }
     },
     "OpenAIKey": {
       "type": "securestring",
-      "defaultValue": "sk-",
       "metadata": {
         "description": "OpenAI API Key"
       }
@@ -176,7 +168,6 @@
     }
   },
   "variables": {
-    "ContainerImageName": "redis/redis-stack-server:latest",
     "WebAppImageName": "DOCKER|fruocco/oai-embeddings",
     "BlobContainerName": "documents",
     "FileShareName": "redisdata",
@@ -212,6 +203,53 @@
           "linuxFxVersion": "[variables('WebAppImageName')]"
         }
       }
+    },
+    {
+            "type": "Microsoft.Cache/redisEnterprise",
+            "apiVersion": "2023-03-01-preview",
+            "name": "[parameters('RedisName')]",
+            "location": "[resourceGroup().location]",
+            "sku": {
+                "name": "Enterprise_E10",
+                "capacity": 2
+            },
+            "zones": [
+                "1",
+                "2",
+                "3"
+            ],
+            "identity": {
+                "type": "None"
+            },
+            "properties": {
+                "minimumTlsVersion": "1.2"
+            }
+    },
+    {
+            "type": "Microsoft.Cache/redisEnterprise/databases",
+            "apiVersion": "2023-03-01-preview",
+            "name": "[concat(parameters('RedisName'), '/default')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Cache/redisEnterprise', parameters('RedisName'))]"
+            ],
+            "properties": {
+                "clientProtocol": "Plaintext",
+                "port": 10000,
+                "clusteringPolicy": "EnterpriseCluster",
+                "evictionPolicy": "NoEviction",
+                "modules": [
+                    {
+                        "name": "RedisJSON"
+                    },
+                    {
+                        "name": "RediSearch"
+                    }
+                ],
+                "persistence": {
+                    "aofEnabled": false,
+                    "rdbEnabled": false
+                }
+            }
     },
     {
       "name": "[parameters('StorageAccountName')]",
@@ -315,7 +353,8 @@
       "dependsOn": [
         "[concat('Microsoft.Web/serverfarms/', parameters('HostingPlanName'))]",
         "[concat('Microsoft.Storage/storageAccounts/', parameters('StorageAccountName'))]",
-        "[concat('Microsoft.Insights/components/', parameters('ApplicationInsightsName'))]"
+        "[concat('Microsoft.Insights/components/', parameters('ApplicationInsightsName'))]",
+		"[resourceId('Microsoft.Cache/redisEnterprise/databases', parameters('RedisName'), 'default')]"
       ],
       "properties": {
         "name": "[parameters('FunctionName')]",
@@ -355,7 +394,7 @@
             },
             {
               "name": "OPENAI_API_BASE",
-              "value": "[concat('https://', parameters('OpenAIName'), '.openai.azure.com/')]"
+              "value": "[parameters('OpenAIEndpoint')]"
             },
             {
               "name": "OPENAI_API_KEY",
@@ -391,11 +430,15 @@
             },
             {
               "name": "REDIS_ADDRESS",
-              "value": "[concat(parameters('DNSNameLabel'),'.' , resourceGroup().location ,'.azurecontainer.io')]"
+              "value": "[reference(resourceId('Microsoft.Cache/redisEnterprise', parameters('RedisName')), '2023-03-01-preview').hostName]"
             },
             {
               "name": "REDIS_PASSWORD",
-              "value": "[parameters('RedisPassword')]"
+              "value": "[listKeys(resourceId('Microsoft.Cache/redisEnterprise/databases', parameters('RedisName'), 'default'), '2023-03-01-preview').primaryKey]"
+            }, 
+			{
+              "name": "REDIS_PORT",
+              "value": 10000
             },
             {
               "name": "TRANSLATE_ENDPOINT",
@@ -431,69 +474,6 @@
       }
     },
     {
-      "name": "[parameters('ContainerName')]",
-      "type": "Microsoft.ContainerInstance/containerGroups",
-      "apiVersion": "2021-10-01",
-      "location": "[resourceGroup().location]",
-      "properties": {
-        "containers": [
-          {
-            "name": "[parameters('ContainerName')]",
-            "properties": {
-              "image": "[variables('ContainerImageName')]",
-              "resources": {
-                "requests": {
-                  "cpu": 1,
-                  "memoryInGb": 1.5
-                }
-              },
-              "environmentVariables": [
-                {
-                  "name": "REDIS_ARGS",
-                  "value": "[concat('--requirepass ', parameters('RedisPassword'))]"
-                }
-              ],
-              "ports": [
-                {
-                  "protocol": "TCP",
-                  "port": 6379
-                }
-              ],
-              "volumeMounts": [
-                {
-                  "name": "[variables('FileShareName')]",
-                  "mountPath": "/data"
-                }
-              ]
-            }
-          }
-        ],
-        "osType": "Linux",
-        "ipAddress": {
-          "type": "Public",
-          "ports": [
-            {
-              "protocol": "TCP",
-              "port": 6379
-            }
-          ],
-          "dnsNameLabel": "[parameters('DNSNameLabel')]"
-        },
-        "initContainers": [
-        ],
-        "volumes": [
-          {
-            "name": "[variables('FileShareName')]",
-            "azureFile": {
-              "shareName": "[variables('FileShareName')]",
-              "storageAccountName": "[parameters('StorageAccountName')]",
-              "storageAccountKey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('StorageAccountName')), '2021-08-01').keys[0].value]"
-            }
-          }
-        ]
-      }
-    },
-    {
       "type": "Microsoft.Web/sites/host/functionKeys",
       "apiVersion": "2018-11-01",
       "name": "[concat(parameters('FunctionName'), '/default/clientKey')]",
@@ -513,7 +493,8 @@
       "kind": "string",
       "dependsOn": [
         "[resourceId('Microsoft.Web/sites', parameters('WebsiteName'))]",
-        "[concat('Microsoft.Insights/components/', parameters('ApplicationInsightsName'))]"
+        "[concat('Microsoft.Insights/components/', parameters('ApplicationInsightsName'))]",
+		"[resourceId('Microsoft.Cache/redisEnterprise/databases', parameters('RedisName'), 'default')]"
       ],
       "properties": {
         "APPINSIGHTS_INSTRUMENTATIONKEY": "[reference(resourceId('Microsoft.Insights/components', parameters('ApplicationInsightsName')), '2015-05-01').InstrumentationKey]",
@@ -521,9 +502,10 @@
         "OPENAI_DEPLOYMENT_TYPE": "[parameters('OpenAIDeploymentType')]",
         "OPENAI_EMBEDDINGS_ENGINE_DOC": "[parameters('OpenAIEmbeddingsEngineDoc')]",
         "OPENAI_EMBEDDINGS_ENGINE_QUERY": "[parameters('OpenAIEmbeddingsEngineQuery')]",
-        "REDIS_ADDRESS": "[concat(parameters('DNSNameLabel'),'.' , resourceGroup().location ,'.azurecontainer.io')]",
-        "REDIS_PASSWORD": "[parameters('RedisPassword')]",
-        "OPENAI_API_BASE": "[concat('https://', parameters('OpenAIName'),'.openai.azure.com/')]",
+        "REDIS_ADDRESS": "[reference(resourceId('Microsoft.Cache/redisEnterprise', parameters('RedisName')), '2023-03-01-preview').hostName]",
+        "REDIS_PASSWORD": "[listKeys(resourceId('Microsoft.Cache/redisEnterprise/databases', parameters('RedisName'), 'default'), '2023-03-01-preview').primaryKey]",
+		    "REDIS_PORT": 10000,
+        "OPENAI_API_BASE": "[parameters('OpenAIEndpoint')]",
         "OPENAI_API_KEY": "[parameters('OpenAIKey')]",
         "OPENAI_TEMPERATURE": "[parameters('OpenAITemperature')]",
         "OPENAI_MAX_TOKENS": "[parameters('OpenAIMaxTokens')]",
